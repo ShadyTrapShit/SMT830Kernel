@@ -30,14 +30,14 @@ parser.add_option("-d", "--objdump", dest="objdump_name",
                   help="name of objdump executable (in path)")
 (options, args) = parser.parse_args()
 
-if (options.objdump_name == None):
+if options.objdump_name is None:
         sys.exit("No objdump executable specified - use -d or --objdump option")
 
 # initialize global dicts and regular expression
 
-build_ids = dict();
-mmaps = dict();
-disasm_cache = dict();
+build_ids = {};
+mmaps = {};
+disasm_cache = {};
 disasm_re = re.compile("^\s*([0-9a-fA-F]+):")
 
 cache_size = 16*1024
@@ -47,10 +47,8 @@ def trace_begin():
         bid_re = re.compile("([a-fA-f0-9]+)[ \t]([^ \n]+)")
         for line in cmd_output:
                 m = bid_re.search(line)
-                if (m != None) :
-                        build_ids[m.group(2)] =  \
-                        os.environ['PERF_BUILDID_DIR'] +  \
-                        m.group(2) + "/" + m.group(1);
+                if (m != None):
+                        build_ids[m[2]] = (((os.environ['PERF_BUILDID_DIR'] + m[2]) + "/") + m[1]);
 
         if ((options.vmlinux_name != None) and ("[kernel.kallsyms]" in build_ids)):
                 build_ids['[kernel.kallsyms]'] = options.vmlinux_name;
@@ -61,8 +59,8 @@ def trace_begin():
         cmd_output= check_output("perf script --show-mmap-events | fgrep PERF_RECORD_MMAP2",shell=True).split('\n')
         for line in cmd_output:
                 m = mmap_re.search(line)
-                if (m != None) :
-                        mmaps[m.group(2)] = int(m.group(1),0)
+                if (m != None):
+                        mmaps[m[2]] = int(m[1], 0)
 
 
 

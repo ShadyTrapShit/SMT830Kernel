@@ -22,9 +22,7 @@ class CompilerWrapper():
       compiler = os.path.basename(os.readlink(__file__))
     else:
       compiler = os.path.basename(os.path.abspath(__file__))
-    self.real_compiler = os.path.join(
-        compiler_path,
-        "real-" + compiler)
+    self.real_compiler = os.path.join(compiler_path, f"real-{compiler}")
     self.argv0 = self.real_compiler
 
   def process_gomacc_command(self):
@@ -40,10 +38,10 @@ class CompilerWrapper():
     while i < len(self.args):
       if self.args[i] in self.custom_flags:
         self.custom_flags[self.args[i]] = self.args[i + 1]
-        i = i + 2
+        i += 2
       else:
         args.append(self.args[i])
-        i = i + 1
+        i += 1
     self.args = args
 
   def add_flags(self):

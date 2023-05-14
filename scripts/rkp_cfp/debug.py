@@ -63,9 +63,7 @@ def validate_instrumentation(objdump_uninstr, skip, skip_stp, skip_asm, skip_sav
         """
         m = re.search(r'^{hex_char_re}{{16}}:\s+{hex_char_re}{{8}}\s+(.*)'.format(
             hex_char_re=hex_char_re), line)
-        if m:
-            return m.group(1)
-        return ''
+        return m[1] if m else ''
 
     #
     # Error reporting functions.
@@ -79,10 +77,13 @@ def validate_instrumentation(objdump_uninstr, skip, skip_stp, skip_asm, skip_sav
                     for line in func_lines:
                         log(line.rstrip('\n'))
                 success.value = False
+
     def errmsg(list_of_func_lines, msg):
         _msg(list_of_func_lines, msg, True)
+
     def warmsg(list_of_func_lines, msg):
         _msg(list_of_func_lines, msg, False)
+
     def err(list_of_args, msg, error):
         with lock:
             if len(list_of_args) > 0:
@@ -152,7 +153,7 @@ def validate_instrumentation(objdump_uninstr, skip, skip_stp, skip_asm, skip_sav
                     These lines in objdump of vmlinux_instr aren't instrumented correcly:
                     """))
                     n = min(5, len(uninstr_lines))
-                    for line in uninstr_lines[0:n]:
+                    for line in uninstr_lines[:n]:
                         log(line)
                     if n < len(uninstr_lines):
                         log("...")
@@ -164,6 +165,7 @@ def validate_instrumentation(objdump_uninstr, skip, skip_stp, skip_asm, skip_sav
                     ):
                 uninstr_lines.append(line)
                 return True
+
         uninstrumented_prologue_errors = []
         prologue_errors = []
         nargs_errors = []
@@ -248,136 +250,140 @@ def validate_instrumentation(objdump_uninstr, skip, skip_stp, skip_asm, skip_sav
         """
         Validations to perform on the uninstrumented vmlinux binary words.
         """
-        if objdump_uninstr.JOPP_CHECK_MAGIC_NUMBER_ON_BLR:
-            magic_errors = []
-            def each_word(section):
-                read_f = open(objdump_uninstr.vmlinux_old, 'rb')
-                read_f.seek(0)
-                read_mmap = mmap.mmap(read_f.fileno(), 0, access=mmap.ACCESS_READ)
-                try:
-                    i = section['offset']
-                    while i + 4 < section['size']:
-                        word = read_mmap[i:i+4]
-                        yield i, word
-                        i += 4
-                finally:
-                    read_mmap.close()
-                    read_f.close()
-            for section in objdump_uninstr.sections['sections']:
-                if 'CODE' in section['type']:
-                    # Make sure JOPP_FUNCTION_ENTRY_POINT_MAGIC_NUMBER 
-                    # doesn't appear in a word of an uninstrumented vmlinux.
-                    for i, word in each_word(section):
-                        if word == objdump_uninstr.JOPP_FUNCTION_ENTRY_POINT_MAGIC_NUMBER:
-                            magic_errors.append([i, section])
-            err(magic_errors, """
+        if not objdump_uninstr.JOPP_CHECK_MAGIC_NUMBER_ON_BLR:
+            return
+        magic_errors = []
+        def each_word(section):
+            read_f = open(objdump_uninstr.vmlinux_old, 'rb')
+            read_f.seek(0)
+            read_mmap = mmap.mmap(read_f.fileno(), 0, access=mmap.ACCESS_READ)
+            try:
+                i = section['offset']
+                while i + 4 < section['size']:
+                    word = read_mmap[i:i+4]
+                    yield i, word
+                    i += 4
+            finally:
+                read_mmap.close()
+                read_f.close()
+
+        for section in objdump_uninstr.sections['sections']:
+            if 'CODE' in section['type']:
+                # Make sure JOPP_FUNCTION_ENTRY_POINT_MAGIC_NUMBER 
+                # doesn't appear in a word of an uninstrumented vmlinux.
+                for i, word in each_word(section):
+                    if word == objdump_uninstr.JOPP_FUNCTION_ENTRY_POINT_MAGIC_NUMBER:
+                        magic_errors.append([i, section])
+        err(magic_errors, """
             The magic number chosen to place at the start of every function already 
             appears in the uninstrumented vmlinux.  Find a new magic number!
             (JOPP_FUNCTION_ENTRY_POINT_MAGIC_NUMBER = {JOPP_FUNCTION_ENTRY_POINT_MAGIC_NUMBER}) 
             """, 
-            error=lambda i, section: "0x{addr} in section {section}".format(
-                addr=instrument._hex(i + section['address']), section=section['name']))
+        error=lambda i, section: "0x{addr} in section {section}".format(
+            addr=instrument._hex(i + section['address']), section=section['name']))
+
     def validate_uninstr_lines():
         """
         Validations to perform on the uninstrumented vmlinux objdump lines.
         """
-        if objdump_uninstr.JOPP_FUNCTION_NOP_SPACERS: 
-            # Assume that the key might change and require return-address reencryption.  This 
-            # means we need to have all copies of x30 either in x30 itself, or saved in memory 
-            # and pointed to by a frame pointer.
-            #
-            # In particular, we can't allow return-addresses being saved in callee registers 
-            # as is done in some low-level assembly routines, since when the key changes these 
-            # registers will become invalid and not be re-encrypted.
-            #
-            # Look for and warn about: 
-            #
-            # mov <rd>, x30
-            # ...
-            # ret <rd>
-            mov_ret_errors = []
-            nop_spacer_errors = []
-            missing_asm_annot_errors = []
-            c_func_br_errors = []
-            ldp_spacer_error_funcs = set([])
-            stp_spacer_error_funcs = set([])
-            ldp_spacer_errors = []
-            stp_spacer_errors = []
-            atomic_prologue_errors = []
-            atomic_prologue_error_funcs = set([])
-            for func_i, func, lines, last_insns in objdump_uninstr.each_func_lines(num_last_insns=2, with_func_i=True):
-                mov_registers = set([])
-                ret_registers = set([])
-                is_c_func = func in c_functions
-                saw_br = False
-                #if objdump_uninstr.JOPP_FUNCTION_NOP_SPACERS and \
-                        #not instrument.skip_func(func, skip, skip_asm) and func in asm_functions:
-                    #if any(not re.search('\tnop$', l) for l in last_insns if l is not None):
-                        #nop_spacer_errors.append(lines)
-                for i, line in enumerate(lines, start=func_i):
-                    def slice_lines(start, end):
-                        return lines[start-func_i:end-func_i]
-                    m = re.search(r'mov\t(?P<mov_register>{register_re}), x30'.format(register_re=register_re), line)
-                    if m and m.group('mov_register') != 'sp':
-                        mov_registers.add(m.group('mov_register'))
-                        continue
-                    m = re.search(r'ret\t(?P<ret_register>{register_re})'.format(register_re=register_re), line)
-                    if m:
-                        ret_registers.add(m.group('ret_register'))
-                        continue
-                    m = re.search(r'ldp\tx29,\s+x30,', line)
-                    if m:
-                        for l in lines[i+1:i+3]:
-                            if not re.search(r'nop$'):
-                                ldp_spacer_errors.append(lines)
-                                ldp_spacer_error_funcs.add(func)
-                                break
-                        continue
-                    m = re.search(r'stp\tx29,\s+x30,', line)
-                    if m and func not in skip_stp:
-                        missing_nop = False
-                        for l in slice_lines(i-1, i):
-                            if not re.search(r'nop$', l):
-                                stp_spacer_errors.append(lines)
-                                stp_spacer_error_funcs.add(func)
-                                missing_nop = True
-                                break
-                        if missing_nop:
-                            continue
-                        if func == '__kvm_vcpu_run':
-                            pr({'func':func})
-                        mov_j, movx29_insn = instrument.find_add_x29_x30_imm(objdump_uninstr, func, func_i, i)
-                        for l in slice_lines(i+1, mov_j):
-                            if func not in atomic_prologue_error_funcs and re.search(r'\b(x29|sp)\b', insn_text(l)):
-                                atomic_prologue_errors.append(lines)
-                                atomic_prologue_error_funcs.add(func)
-                                break
-                        continue
-                # End of function; check for errors in that function, and if so, perserve its output.
-                if len(mov_registers.intersection(ret_registers)) > 0 and func not in skip_save_lr_to_stack:
-                    mov_ret_errors.append(lines)
+        if not objdump_uninstr.JOPP_FUNCTION_NOP_SPACERS:
+            return
+        # Assume that the key might change and require return-address reencryption.  This 
+        # means we need to have all copies of x30 either in x30 itself, or saved in memory 
+        # and pointed to by a frame pointer.
+        #
+        # In particular, we can't allow return-addresses being saved in callee registers 
+        # as is done in some low-level assembly routines, since when the key changes these 
+        # registers will become invalid and not be re-encrypted.
+        #
+        # Look for and warn about: 
+        #
+        # mov <rd>, x30
+        # ...
+        # ret <rd>
+        mov_ret_errors = []
+        nop_spacer_errors = []
+        missing_asm_annot_errors = []
+        c_func_br_errors = []
+        ldp_spacer_error_funcs = set([])
+        stp_spacer_error_funcs = set([])
+        ldp_spacer_errors = []
+        stp_spacer_errors = []
+        atomic_prologue_errors = []
+        atomic_prologue_error_funcs = set([])
+        for func_i, func, lines, last_insns in objdump_uninstr.each_func_lines(num_last_insns=2, with_func_i=True):
+            mov_registers = set([])
+            ret_registers = set([])
+            is_c_func = func in c_functions
+            saw_br = False
+            for i, line in enumerate(lines, start=func_i):
+                def slice_lines(start, end):
+                    return lines[start-func_i:end-func_i]
 
-            errmsg(c_func_br_errors, """
+                m = re.search(r'mov\t(?P<mov_register>{register_re}), x30'.format(register_re=register_re), line)
+                if m and m['mov_register'] != 'sp':
+                    mov_registers.add(m['mov_register'])
+                    continue
+                m = re.search(r'ret\t(?P<ret_register>{register_re})'.format(register_re=register_re), line)
+                if m:
+                    ret_registers.add(m['ret_register'])
+                    continue
+                m = re.search(r'ldp\tx29,\s+x30,', line)
+                if m:
+                    for l in lines[i+1:i+3]:
+                        if not re.search(r'nop$'):
+                            ldp_spacer_errors.append(lines)
+                            ldp_spacer_error_funcs.add(func)
+                            break
+                    continue
+                m = re.search(r'stp\tx29,\s+x30,', line)
+                if m and func not in skip_stp:
+                    missing_nop = False
+                    for l in slice_lines(i-1, i):
+                        if not re.search(r'nop$', l):
+                            stp_spacer_errors.append(lines)
+                            stp_spacer_error_funcs.add(func)
+                            missing_nop = True
+                            break
+                    if missing_nop:
+                        continue
+                    if func == '__kvm_vcpu_run':
+                        pr({'func':func})
+                    mov_j, movx29_insn = instrument.find_add_x29_x30_imm(objdump_uninstr, func, func_i, i)
+                    for l in slice_lines(i+1, mov_j):
+                        if func not in atomic_prologue_error_funcs and re.search(r'\b(x29|sp)\b', insn_text(l)):
+                            atomic_prologue_errors.append(lines)
+                            atomic_prologue_error_funcs.add(func)
+                            break
+                    continue
+                # End of function; check for errors in that function, and if so, perserve its output.
+            if (
+                mov_registers.intersection(ret_registers)
+                and func not in skip_save_lr_to_stack
+            ):
+                mov_ret_errors.append(lines)
+
+        errmsg(c_func_br_errors, """
             Saw a C function in vmlinux without information about the number of arguments it takes.
 
             We need to know this to zero registers on BLR jumps.
             """)
 
-            errmsg(missing_asm_annot_errors, """
+        errmsg(missing_asm_annot_errors, """
             Saw an assembly rountine(s) that hasn't been annotated with the number of 
             general purpose registers it uses.
 
             Change ENTRY to FUNC_ENTRY for these assembly functions.
             """)
 
-            errmsg(nop_spacer_errors, """
+        errmsg(nop_spacer_errors, """
             Saw an assembly rountine(s) that doesn't have 2 nop instruction immediately 
             before the function label.
 
             We need these for any function that might be the target of a blr instruction!
             """)
 
-            errmsg(mov_ret_errors, """
+        errmsg(mov_ret_errors, """
             Saw an assembly routine(s) saving LR into a register instead of on the stack.  
             This would prevent us from re-encrypting it properly!
             Modify these routine(s) to save LR on the stack and adjust the frame pointer (like in prologues of C functions).
@@ -391,15 +397,15 @@ def validate_instrumentation(objdump_uninstr, skip, skip_stp, skip_asm, skip_sav
             NOTE: We're only reporting functions found in the compiled vmlinux 
             (gcc might remove dead code that needs patching as well)
             """)
-            errmsg(ldp_spacer_errors, """
+        errmsg(ldp_spacer_errors, """
             Saw a function with ldp x29, x30 but without 2 nops following it.
             Either add an LDP_SPACER to this, use the right compiler, or make an exception.
             """)
-            errmsg(stp_spacer_errors, """
+        errmsg(stp_spacer_errors, """
             Saw a function with stp x29, x30 but without 1 nop before it.
             Either add an STP_SPACER to this, use the right compiler, or make an exception.
             """)
-            warmsg(atomic_prologue_errors, """
+        warmsg(atomic_prologue_errors, """
             Saw a function prologue with: 
             <func>:
                 stp x29, x30, ...
@@ -413,7 +419,7 @@ def validate_instrumentation(objdump_uninstr, skip, skip_stp, skip_asm, skip_sav
                 add x29, sp, #...
                 (insns)
             """)
-             
+
     procs = []
     # for validate in [validate_uninstr_lines]:
     for validate in [validate_bin, validate_instr, validate_uninstr_lines, validate_uninstr_binary]:
@@ -448,6 +454,9 @@ if common.run_from_ipython():
             key = 0
             for i in xrange(0, 8):
                 key |= first_byte_of_key << i*8
-            return {'decaddr':'0x' + instrument._hex(instrument._int(addr) ^ key),
-                    'key':'0x' + instrument._hex(key)}
+            return {
+                'decaddr': f'0x{instrument._hex(instrument._int(addr) ^ key)}',
+                'key': f'0x{instrument._hex(key)}',
+            }
+
         return map(__d, addrs)

@@ -70,17 +70,24 @@ Here comes the ugly part
 For SLSI kernel, CROSS_COMPILE contains the whole path
 For QC kernel, CROSS_COMPILE only have aarch64-linux-android-
 '''
+
 CROSS_COMPILE = re.sub('^.*ccache\s+', '', os.environ.get('CROSS_COMPILE'))
 assert CROSS_COMPILE is not None
 
-OBJDUMP = CROSS_COMPILE+"objdump"
-NM = CROSS_COMPILE+"nm"
+OBJDUMP = f"{CROSS_COMPILE}objdump"
+NM = f"{CROSS_COMPILE}nm"
 
 if (os.path.isfile(OBJDUMP) is False) and (not which(OBJDUMP)):
-    raise RuntimeError(OBJDUMP+" does NOT contain full path and it is not in PATH"+"  PATH="+os.environ.get('PATH'))
+    raise RuntimeError(
+        f"{OBJDUMP} does NOT contain full path and it is not in PATH  PATH="
+        + os.environ.get('PATH')
+    )
 
 if (os.path.isfile(NM) is False) and (not which(NM)):
-    raise RuntimeError(NM+" does NOT contain full path and it is not in PATH"+"  PATH="+os.environ.get('PATH'))
+    raise RuntimeError(
+        f"{NM} does NOT contain full path and it is not in PATH  PATH="
+        + os.environ.get('PATH')
+    )
 
 hex_re = r'(?:[a-f0-9]+)'
 virt_addr_re = re.compile(r'^(?P<virt_addr>{hex_re}):\s+'.format(hex_re=hex_re))
@@ -367,22 +374,19 @@ class Objdump(object):
         with open(tmp, 'r') as f:
             for i, line in enumerate(f):
                 virt_addr = None
-                m = re.search(virt_addr_re, line)
-                if m:
-                    virt_addr = _int(m.group('virt_addr'))
+                if m := re.search(virt_addr_re, line):
+                    virt_addr = _int(m['virt_addr'])
 
                 self.lines.append((line, section_idx, virt_addr))
 
-                m = re.search(r'Disassembly of section (?P<name>.*):', line)
-                if m:
-                    section_idx = self.sections['section_idx'][m.group('name')]
+                if m := re.search(r'Disassembly of section (?P<name>.*):', line):
+                    section_idx = self.sections['section_idx'][m['name']]
                     continue
 
-                m = re.search(common.fun_rec, line)
-                if m:
-                    if m.group('func_name') not in self.func_idx:
-                        self.func_idx[m.group('func_name')] = set()
-                    self.func_idx[m.group('func_name')].add(i)
+                if m := re.search(common.fun_rec, line):
+                    if m['func_name'] not in self.func_idx:
+                        self.func_idx[m['func_name']] = set()
+                    self.func_idx[m['func_name']].add(i)
                     continue
         # We have all the objdump lines read, we can delete the file now.
         #self._copy_to_tmp(tmp, 'objdump.txt')
@@ -497,14 +501,10 @@ class Objdump(object):
         self.read_f = None
 
     def is_conf_set(self, var):
-        if self.conf is None:
-            return None
-        return self.conf.get(var) == 'y'
+        return None if self.conf is None else self.conf.get(var) == 'y'
 
     def get_conf(self, var):
-        if self.conf is None:
-            return None
-        return self.conf.get(var) 
+        return None if self.conf is None else self.conf.get(var) 
 
     def flush(self):
         self.write_mmap.flush()
@@ -570,7 +570,7 @@ class Objdump(object):
     def func_offset(self, func, i=None):
         i = self.get_func_idx(func, i)
         m = re.search(Objdump.FUNC_OFFSET_RE, self.line(i))
-        return _int(m.group('virt_addr'))
+        return _int(m['virt_addr'])
 
     PARSE_INSN_RE = re.compile((
         r'(?P<virt_addr>{hex_re}):\s+'
@@ -602,7 +602,7 @@ class Objdump(object):
         if insn['type'] == 'bl':
             # imm26 (bits 0..25)
             insn['args']['offset'] = from_twos_compl((hexint(insn['binary']) & BL_OFFSET_MASK) << 2, nbits=26 + 2)
-        elif insn['type'] in set(['blr', 'ret']):
+        elif insn['type'] in {'blr', 'ret'}:
             arg = {
             'blr':'dst_reg',
             'ret':'target_reg',
@@ -618,8 +618,9 @@ class Objdump(object):
             insn['args']['imm'] = from_twos_compl(
                     ((hexint(insn['binary']) & STP_IMM7_MASK) >> 15) << lsl_bits, 
                     nbits=7 + lsl_bits)
-        elif mask_shift(insn, ADDIMM_OPCODE_MASK, 24) == ADDIM_OPCODE_BITS \
-                and insn['type'] in set(['add', 'mov']):
+        elif mask_shift(insn, ADDIMM_OPCODE_MASK, 24) == ADDIM_OPCODE_BITS and insn[
+            'type'
+        ] in {'add', 'mov'}:
             insn['type'] = 'add'
             insn['args']['sf'] = mask_shift(insn, ADDIMM_SF_MASK, 31)
             insn['args']['shift'] = mask_shift(insn, ADDIMM_SHIFT_MASK, 22)
@@ -636,15 +637,16 @@ class Objdump(object):
             insn['args']['reg1']     = mask_shift(insn , STP_RT_MASK              , 0)
             insn['args']['base_reg'] = mask_shift(insn , STP_RN_MASK              , 5)
             insn['args']['reg2']     = mask_shift(insn , STP_RT2_MASK             , 10)
-        elif mask_shift(insn, ADDIMM_OPCODE_MASK, 24) == ADDIM_OPCODE_BITS \
-                and insn['type'] in set(['add', 'mov']):
-                insn['type'] = 'add'
-                insn['args']['sf'] = mask_shift(insn, ADDIMM_SF_MASK, 31)
-                insn['args']['shift'] = mask_shift(insn, ADDIMM_SHIFT_MASK, 22)
-                insn['args']['imm'] = mask_shift(insn, ADDIMM_IMM_MASK, 10)
-                insn['args']['src_reg'] = mask_shift(insn, ADDIMM_RN_MASK, 5)
-                insn['args']['dst_reg'] = mask_shift(insn, ADDIMM_RD_MASK, 0)
-                insn['args']['opcode_bits'] = mask_shift(insn, ADDIMM_OPCODE_MASK, 24)
+        elif mask_shift(insn, ADDIMM_OPCODE_MASK, 24) == ADDIM_OPCODE_BITS and insn[
+            'type'
+        ] in {'add', 'mov'}:
+            insn['type'] = 'add'
+            insn['args']['sf'] = mask_shift(insn, ADDIMM_SF_MASK, 31)
+            insn['args']['shift'] = mask_shift(insn, ADDIMM_SHIFT_MASK, 22)
+            insn['args']['imm'] = mask_shift(insn, ADDIMM_IMM_MASK, 10)
+            insn['args']['src_reg'] = mask_shift(insn, ADDIMM_RN_MASK, 5)
+            insn['args']['dst_reg'] = mask_shift(insn, ADDIMM_RD_MASK, 0)
+            insn['args']['opcode_bits'] = mask_shift(insn, ADDIMM_OPCODE_MASK, 24)
         else:
             insn['args']['raw'] = line[m.end():]
         return insn
@@ -813,10 +815,11 @@ class Objdump(object):
         end = len(self.lines) - 1
         if end_func is not None:
             end = self.get_func_end_idx(end_func, end_i)
-        assert not( end_func is None and end_i is not None )
-        
+        assert end_func is not None or end_i is None
+
         def should_skip_func(func):
             return skip_func is not None and skip_func(func)
+
         assert start_func is not None
 
         last_insns = None
@@ -842,10 +845,7 @@ class Objdump(object):
 
         do_skip_func = should_skip_func(start_func)
         def _tup(i, curfunc, func_i, to_yield):
-            if just_insns:
-                return i, to_yield
-            else:
-                return curfunc, func_i, i, to_yield
+            return (i, to_yield) if just_insns else (curfunc, func_i, i, to_yield)
 
         def _parse(to_yield, i):
             if to_yield is None:
@@ -894,13 +894,13 @@ class Objdump(object):
             end_func_idx = min(i+chunk-1, len(funcs)-1)
             start_i = funcs[start_func_idx][1]
             end_i = funcs[end_func_idx][1]
-            kwargs.update({
-                'start_func':funcs[start_func_idx][0],
-                'end_func':funcs[end_func_idx][0],
-                'start_i':start_i,
-                'end_i':end_i,
-                'tid':n,
-                })
+            kwargs |= {
+                'start_func': funcs[start_func_idx][0],
+                'end_func': funcs[end_func_idx][0],
+                'start_i': start_i,
+                'end_i': end_i,
+                'tid': n,
+            }
             if threads == 1:
                 each_insn(**kwargs)
                 return
@@ -993,18 +993,19 @@ def parse_nm(vmlinux, symbols=None):
     last_symbol = None
     last_name = None
     for line in f:
-        m = re.search(NM_RE, line)
-        if m:
+        if m := re.search(NM_RE, line):
             if last_symbol is not None and ( symbols is None or last_name in symbols ):
-                last_symbol[NE_SIZE] = ( _int(m.group('addr')) - _int(last_symbol[NE_ADDR]) ) / BYTES_PER_INSN \
-                            if \
-                                re.match(hex_re, last_symbol[NE_ADDR]) and \
-                                re.match(hex_re, m.group('addr')) \
-                            else None
-            last_symbol = [m.group('symbol_type'), m.group('addr'), None]
-            last_name = m.group('symbol')
-            if symbols is None or m.group('symbol') in symbols:
-                nm[m.group('symbol')] = last_symbol
+                last_symbol[NE_SIZE] = (
+                    (_int(m['addr']) - _int(last_symbol[NE_ADDR]))
+                    / BYTES_PER_INSN
+                    if re.match(hex_re, last_symbol[NE_ADDR])
+                    and re.match(hex_re, m['addr'])
+                    else None
+                )
+            last_symbol = [m['symbol_type'], m['addr'], None]
+            last_name = m['symbol']
+            if symbols is None or m['symbol'] in symbols:
+                nm[m['symbol']] = last_symbol
     return nm
 
 def addr_to_section(hexaddr, sections):
@@ -1061,11 +1062,12 @@ def parse_sections(vmlinux):
         if m:
             section = {}
 
-            d['section_idx'][m.group('name')] = int(m.group('number'))
+            d['section_idx'][m['name']] = int(m['number'])
 
             def parse_power(x):
                 m = re.match(r'(?P<base>\d+)\*\*(?P<exponent>\d+)', x)
-                return int(m.group('base'))**int(m.group('exponent'))
+                return int(m['base'])**int(m['exponent'])
+
             section.update(coerce(m.groupdict(), [
                 [_int, ['size', 'address', 'offset', 'lma']],
                 [int, ['number']],
@@ -1149,8 +1151,7 @@ def main():
 def each_line(fname):
     with open(fname) as f:
         for line in f:
-            line = line.rstrip()
-            yield line
+            yield line.rstrip()
 
 def parse_config(config_file):
     """
@@ -1158,9 +1159,8 @@ def parse_config(config_file):
     """
     conf = {}
     for line in each_line(config_file):
-        m = re.search(r'^\s*(?P<var>[A-Z0-9_]+)=(?P<value>[^\s#]+)', line)
-        if m:
-            conf[m.group('var')] = m.group('value')
+        if m := re.search(r'^\s*(?P<var>[A-Z0-9_]+)=(?P<value>[^\s#]+)', line):
+            conf[m['var']] = m['value']
     return conf
 
 def load_and_cache_objdump(vmlinux, *objdump_args, **objdump_kwargs):
@@ -1188,12 +1188,7 @@ def from_twos_compl(x, nbits):
     """
     # Truely <= nbits long?
     assert x == x & ((2**nbits) - 1)
-    if x & (1 << (nbits - 1)):
-        # sign bit is set; it's negative
-        flip = -( (x ^ (2**nbits) - 1) + 1 )
-        # twiddle = ~x + 1
-        return flip
-    return x
+    return -( (x ^ (2**nbits) - 1) + 1 ) if x & (1 << (nbits - 1)) else x
 
 def to_twos_compl(x, nbits):
     """
